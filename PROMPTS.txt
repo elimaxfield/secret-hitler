@@ -1,0 +1,1327 @@
+================================================================================
+SECRET HITLER ONLINE - IMPLEMENTATION PROMPTS
+================================================================================
+
+This file contains prompts to build the Secret Hitler online game step by step.
+Execute these prompts in order. Each prompt is self-contained but builds on
+previous work. Reference CLAUDE.md for architecture and coding conventions.
+Reference rules.txt for game rules.
+
+================================================================================
+PHASE 1: PROJECT SETUP & INFRASTRUCTURE
+================================================================================
+
+--------------------------------------------------------------------------------
+PROMPT 1.1: Initialize Next.js Project
+--------------------------------------------------------------------------------
+
+Set up a new Next.js 14+ project with the App Router for Secret Hitler online.
+
+Requirements:
+- Create Next.js project with TypeScript, Tailwind CSS, ESLint
+- Use the App Router (not Pages Router)
+- Configure Tailwind with the dark mode color palette from CLAUDE.md
+- Set up the folder structure as defined in CLAUDE.md
+- Create placeholder files for the main directories
+- Install dependencies: @supabase/supabase-js, @supabase/ssr, qrcode.react, uuid
+
+Configure tailwind.config.js with:
+- Custom colors matching the 1930s propaganda aesthetic (see CLAUDE.md color palette)
+- Custom fonts if needed
+- Mobile-first breakpoints
+
+Create a globals.css with:
+- CSS variables for the color palette
+- Base dark mode styles
+- Typography scale
+
+Set up netlify.toml for deployment.
+
+--------------------------------------------------------------------------------
+PROMPT 1.2: Set Up Supabase
+--------------------------------------------------------------------------------
+
+Set up the Supabase database schema and configuration.
+
+Requirements:
+1. Create all SQL migrations for the database schema from CLAUDE.md:
+   - Create the enums (game_phase, player_role, party_type, team_type, executive_action_type)
+   - Create games table with all columns
+   - Create players table with all columns
+   - Create votes table with all columns
+   - Add appropriate indexes for common queries (room_code, game_id, session_id)
+
+2. Set up Row Level Security (RLS) policies:
+   - Games: Anyone can read games they're a player in
+   - Games: Only authenticated actions can update (we'll use service key for game logic)
+   - Players: Players can read all players in their game
+   - Players: Players can only see their own role (create a secure view or filter in app)
+   - Votes: Votes are hidden until all players have voted, then visible
+
+3. Create Supabase client utilities:
+   - src/lib/supabase/client.ts - Browser client with anon key
+   - src/lib/supabase/server.ts - Server client for SSR
+   - src/lib/supabase/types.ts - TypeScript types generated from schema
+
+4. Create environment variable template (.env.example):
+   - NEXT_PUBLIC_SUPABASE_URL
+   - NEXT_PUBLIC_SUPABASE_ANON_KEY
+   - SUPABASE_SERVICE_ROLE_KEY
+
+5. Enable Realtime for games, players, and votes tables.
+
+--------------------------------------------------------------------------------
+PROMPT 1.3: Create Type Definitions
+--------------------------------------------------------------------------------
+
+Create comprehensive TypeScript type definitions for the game.
+
+Create src/types/game.ts with:
+
+1. Core game types:
+   - GamePhase union type matching the database enum
+   - PlayerRole union type
+   - PartyType union type
+   - TeamType union type
+   - ExecutiveActionType union type
+
+2. Entity interfaces:
+   - Game interface matching games table (with proper types for JSONB fields)
+   - Player interface matching players table
+   - Vote interface matching votes table
+
+3. Game state interfaces:
+   - GameState: Combined game + players + votes for frontend consumption
+   - PlayerView: What a specific player can see (hiding other roles)
+   - PublicGameState: What spectators can see
+
+4. Action types:
+   - CreateGameAction
+   - JoinGameAction
+   - StartGameAction
+   - NominateChancellorAction
+   - CastVoteAction
+   - PresidentDiscardAction
+   - ChancellorEnactAction
+   - ExecutiveAction variants (investigate, special election, peek, execute)
+   - VetoAction
+
+5. Utility types:
+   - PolicyType ('liberal' | 'fascist')
+   - Policy deck type
+   - Vote result type
+
+================================================================================
+PHASE 2: CORE GAME ENGINE
+================================================================================
+
+--------------------------------------------------------------------------------
+PROMPT 2.1: Game Constants and Configuration
+--------------------------------------------------------------------------------
+
+Create the game engine constants and configuration.
+
+Create src/lib/game-engine/constants.ts with:
+
+1. ROLE_DISTRIBUTION: Map of player count (5-10) to number of liberals and fascists
+   - Remember: Hitler is always 1 additional fascist-team member
+   - 5 players: 3 liberals, 1 fascist, 1 Hitler
+   - 6 players: 4 liberals, 1 fascist, 1 Hitler
+   - 7 players: 4 liberals, 2 fascists, 1 Hitler
+   - 8 players: 5 liberals, 2 fascists, 1 Hitler
+   - 9 players: 5 liberals, 3 fascists, 1 Hitler
+   - 10 players: 6 liberals, 3 fascists, 1 Hitler
+
+2. FASCIST_BOARD_POWERS: Map of board size to powers at each fascist policy slot
+   - Small (5-6 players): [null, null, 'policy_peek', 'execution', 'execution', null]
+   - Medium (7-8 players): [null, 'investigate_loyalty', 'special_election', 'execution', 'execution', null]
+   - Large (9-10 players): ['investigate_loyalty', 'investigate_loyalty', 'special_election', 'execution', 'execution', null]
+
+3. INITIAL_POLICY_DECK: { liberal: 6, fascist: 11 }
+
+4. WIN_CONDITIONS:
+   - LIBERAL_POLICIES_TO_WIN: 5
+   - FASCIST_POLICIES_TO_WIN: 6
+   - FASCIST_POLICIES_FOR_HITLER_ELECTION_WIN: 3
+
+5. ELECTION_TRACKER_CHAOS_THRESHOLD: 3
+
+6. VETO_UNLOCK_THRESHOLD: 5 (fascist policies needed to unlock veto)
+
+7. getBoardSize(playerCount: number): 'small' | 'medium' | 'large'
+
+8. getExecutivePower(playerCount: number, fascistPolicies: number): ExecutiveActionType | null
+
+--------------------------------------------------------------------------------
+PROMPT 2.2: Role Assignment Logic
+--------------------------------------------------------------------------------
+
+Create the role assignment system.
+
+Create src/lib/game-engine/roles.ts with:
+
+1. assignRoles(playerCount: number): PlayerRole[]
+   - Shuffle and assign roles based on ROLE_DISTRIBUTION
+   - Returns array of roles in random order to assign to players by seat index
+   - Must include exactly 1 Hitler
+
+2. getPartyFromRole(role: PlayerRole): PartyType
+   - Liberal -> 'liberal'
+   - Fascist, Hitler -> 'fascist'
+
+3. getFascistKnowledge(players: Player[], currentPlayer: Player): Player[]
+   - For 5-6 players: Fascists AND Hitler see each other
+   - For 7-10 players: Fascists see each other AND Hitler, but Hitler doesn't see fascists
+   - Returns list of players visible to currentPlayer during night phase
+
+4. getTeammates(players: Player[], currentPlayer: Player): { player: Player; role: PlayerRole }[]
+   - Returns what the current player should see about their teammates
+   - Liberals see no one
+   - Fascists see other fascists and Hitler (with roles)
+   - Hitler sees fascists in 5-6 player games, no one in 7-10
+
+--------------------------------------------------------------------------------
+PROMPT 2.3: Policy Deck Management
+--------------------------------------------------------------------------------
+
+Create the policy deck logic.
+
+Create src/lib/game-engine/policies.ts with:
+
+1. createPolicyDeck(): PolicyType[]
+   - Creates shuffled deck of 6 liberal + 11 fascist policies
+   - Use Fisher-Yates shuffle
+
+2. shuffleDeck(deck: PolicyType[]): PolicyType[]
+   - Fisher-Yates shuffle implementation
+
+3. drawPolicies(deck: PolicyType[], count: number): { drawn: PolicyType[]; remaining: PolicyType[] }
+   - Draw from top of deck
+   - Return drawn cards and remaining deck
+
+4. reshuffleIfNeeded(deck: PolicyType[], discardPile: PolicyType[], minimumCards: number): { deck: PolicyType[]; discardPile: PolicyType[] }
+   - If deck has fewer than minimumCards, shuffle discard pile into deck
+   - Return new deck and empty discard pile
+
+5. discardPolicy(discardPile: PolicyType[], policy: PolicyType): PolicyType[]
+   - Add policy to discard pile
+
+--------------------------------------------------------------------------------
+PROMPT 2.4: Election Logic
+--------------------------------------------------------------------------------
+
+Create the election logic.
+
+Create src/lib/game-engine/elections.ts with:
+
+1. getNextPresidentIndex(currentIndex: number, playerCount: number, alivePlayers: boolean[]): number
+   - Find next alive player clockwise from current president
+   - Skip dead players
+   - Handle wrap-around
+
+2. isEligibleForChancellor(game: Game, players: Player[], candidateId: string): boolean
+   - Not the current presidential candidate
+   - Not dead
+   - Not term-limited (previous president or chancellor)
+   - Exception: With 5 or fewer alive players, previous president IS eligible
+
+3. getEligibleChancellorCandidates(game: Game, players: Player[]): Player[]
+   - Filter all players by eligibility
+
+4. calculateVoteResult(votes: Vote[]): { passed: boolean; yesCount: number; noCount: number }
+   - Majority yes = passed
+   - Tie = failed
+   - Return counts for display
+
+5. handleFailedElection(game: Game): { electionTracker: number; chaos: boolean }
+   - Increment election tracker
+   - Return whether chaos threshold reached
+
+6. handleChaos(game: Game): { topPolicy: PolicyType; newDeck: PolicyType[]; discardPile: PolicyType[] }
+   - Draw and enact top policy
+   - Reshuffle if needed
+   - Note: Chaos-enacted policies don't trigger executive powers
+
+7. resetTermLimits(game: Game): Partial<Game>
+   - Called after chaos, clears previous president/chancellor
+
+8. checkHitlerElection(game: Game, chancellorId: string, players: Player[]): boolean
+   - If 3+ fascist policies enacted and chancellor is Hitler, fascists win
+
+--------------------------------------------------------------------------------
+PROMPT 2.5: Legislative Session Logic
+--------------------------------------------------------------------------------
+
+Create the legislative session logic.
+
+Create src/lib/game-engine/legislative.ts with:
+
+1. startLegislativeSession(game: Game): { drawnPolicies: PolicyType[]; newDeck: PolicyType[]; discardPile: PolicyType[] }
+   - President draws 3 policies
+   - Reshuffle if needed first
+   - Update game state
+
+2. presidentDiscardPolicy(drawnPolicies: PolicyType[], discardIndex: number): { remainingPolicies: PolicyType[]; discarded: PolicyType }
+   - President discards 1 of 3
+   - Returns 2 policies for chancellor
+
+3. chancellorEnactPolicy(policies: PolicyType[], enactIndex: number): { enacted: PolicyType; discarded: PolicyType }
+   - Chancellor chooses 1 of 2 to enact
+   - Other goes to discard pile
+
+4. enactPolicy(game: Game, policy: PolicyType): { game: Partial<Game>; gameOver: boolean; winner?: TeamType }
+   - Update policy count on appropriate track
+   - Check win conditions
+   - Unlock veto if 5 fascist policies
+   - Return executive power if fascist policy triggered one
+
+5. canVeto(game: Game): boolean
+   - Check if veto power is unlocked (5+ fascist policies)
+
+6. handleVetoRequest(game: Game): Partial<Game>
+   - Set veto_requested flag
+   - Wait for president response
+
+7. handleVetoResponse(game: Game, accepted: boolean, discardPile: PolicyType[]): { game: Partial<Game>; newDiscardPile: PolicyType[] }
+   - If accepted: discard both policies, advance election tracker
+   - If rejected: chancellor must enact a policy
+
+--------------------------------------------------------------------------------
+PROMPT 2.6: Executive Actions Logic
+--------------------------------------------------------------------------------
+
+Create the executive actions logic.
+
+Create src/lib/game-engine/executive.ts with:
+
+1. getRequiredExecutiveAction(game: Game): ExecutiveActionType | null
+   - Based on player count and fascist policies enacted
+   - Use FASCIST_BOARD_POWERS from constants
+
+2. executeInvestigation(game: Game, targetPlayerId: string, players: Player[]): { targetParty: PartyType; updatedGame: Partial<Game> }
+   - Get target player's party membership (not role!)
+   - Add target to investigated_players list
+   - Validate target hasn't been investigated before
+
+3. isValidInvestigationTarget(game: Game, targetPlayerId: string, presidentId: string): boolean
+   - Not the president
+   - Not already investigated
+   - Is alive
+
+4. executeSpecialElection(game: Game, targetPlayerId: string, players: Player[]): Partial<Game>
+   - Set the target as next president
+   - Store current president index for return after special election
+
+5. executePolicyPeek(game: Game): PolicyType[]
+   - Return top 3 policies (or fewer if deck is small)
+   - Don't modify deck
+
+6. executeExecution(game: Game, targetPlayerId: string, players: Player[]): { updatedGame: Partial<Game>; gameOver: boolean; winner?: TeamType }
+   - Mark target player as dead
+   - If target is Hitler, liberals win
+   - Update player count for future reference
+
+7. isValidExecutionTarget(presidentId: string, targetPlayerId: string): boolean
+   - Not the president themselves
+   - (Player being alive is already required to be targetable)
+
+--------------------------------------------------------------------------------
+PROMPT 2.7: State Machine and Validation
+--------------------------------------------------------------------------------
+
+Create the game state machine and validation logic.
+
+Create src/lib/game-engine/state.ts with:
+
+1. GameStateMachine class or object:
+   - Define valid transitions between phases
+   - lobby -> night (when game starts)
+   - night -> nomination (after role reveal)
+   - nomination -> voting (after chancellor nominated)
+   - voting -> voting_result (after all votes cast)
+   - voting_result -> legislative_president (if vote passed)
+   - voting_result -> nomination (if vote failed, no chaos)
+   - voting_result -> nomination (if chaos, after policy enacted)
+   - legislative_president -> legislative_chancellor (after president discards)
+   - legislative_chancellor -> veto_requested (if veto conditions met and requested)
+   - legislative_chancellor -> executive_action (if fascist policy with power)
+   - legislative_chancellor -> nomination (if no power needed)
+   - veto_requested -> legislative_chancellor (if veto rejected)
+   - veto_requested -> nomination (if veto accepted)
+   - executive_action -> nomination (after power used)
+   - Any phase -> game_over (on win condition)
+
+2. canTransitionTo(currentPhase: GamePhase, targetPhase: GamePhase): boolean
+
+3. getNextPhase(game: Game, players: Player[]): GamePhase
+   - Determine what phase should come next based on current state
+
+Create src/lib/game-engine/validation.ts with:
+
+1. validateAction(game: Game, players: Player[], playerId: string, action: GameAction): { valid: boolean; error?: string }
+   - Generic action validator that dispatches to specific validators
+
+2. validateNomination(game: Game, players: Player[], nominatorId: string, nomineeId: string): { valid: boolean; error?: string }
+   - Is it nomination phase?
+   - Is nominator the president?
+   - Is nominee eligible?
+
+3. validateVote(game: Game, playerId: string, existingVotes: Vote[]): { valid: boolean; error?: string }
+   - Is it voting phase?
+   - Has player already voted?
+   - Is player alive?
+
+4. validatePresidentDiscard(game: Game, playerId: string, discardIndex: number): { valid: boolean; error?: string }
+   - Is it legislative_president phase?
+   - Is player the president?
+   - Is index valid (0-2)?
+
+5. validateChancellorEnact(game: Game, playerId: string, enactIndex: number): { valid: boolean; error?: string }
+   - Is it legislative_chancellor phase?
+   - Is player the chancellor?
+   - Is index valid (0-1)?
+
+6. validateExecutiveAction(game: Game, players: Player[], presidentId: string, action: ExecutiveAction): { valid: boolean; error?: string }
+   - Is it executive_action phase?
+   - Is player the president?
+   - Is action type correct for current pending power?
+   - Is target valid for the action type?
+
+================================================================================
+PHASE 3: SUPABASE INTEGRATION & GAME ACTIONS
+================================================================================
+
+--------------------------------------------------------------------------------
+PROMPT 3.1: Room Code and Session Utilities
+--------------------------------------------------------------------------------
+
+Create utility functions for room codes and player sessions.
+
+Create src/lib/utils/room-codes.ts with:
+
+1. generateRoomCode(): string
+   - Generate 6-character alphanumeric code
+   - Use only uppercase letters and numbers
+   - Avoid ambiguous characters (0, O, I, 1, L)
+   - Example: "ABC123", "XYZ789"
+
+2. isValidRoomCode(code: string): boolean
+   - Must be exactly 6 characters
+   - Must be alphanumeric
+   - Case insensitive
+
+3. normalizeRoomCode(code: string): string
+   - Convert to uppercase
+   - Trim whitespace
+
+Create src/lib/utils/session.ts with:
+
+1. PlayerSession interface:
+   - sessionId: string (UUID)
+   - playerName: string
+   - currentGameId: string | null
+   - currentRoomCode: string | null
+
+2. getSession(): PlayerSession | null
+   - Read from localStorage
+   - Return null if no session exists
+
+3. createSession(playerName: string): PlayerSession
+   - Generate new UUID for sessionId
+   - Save to localStorage
+   - Return session
+
+4. updateSession(updates: Partial<PlayerSession>): PlayerSession
+   - Update existing session in localStorage
+   - Return updated session
+
+5. clearGameFromSession(): void
+   - Remove currentGameId and currentRoomCode
+   - Keep sessionId and playerName
+
+6. SESSION_STORAGE_KEY constant
+
+--------------------------------------------------------------------------------
+PROMPT 3.2: Game Actions - Create and Join
+--------------------------------------------------------------------------------
+
+Create Supabase functions for creating and joining games.
+
+Create src/lib/supabase/actions/game-actions.ts with:
+
+1. createGame(hostName: string, sessionId: string): Promise<{ game: Game; player: Player }>
+   - Generate unique room code (retry if collision)
+   - Create game in 'lobby' phase
+   - Create host player with seat_index 0
+   - Return game and player data
+
+2. joinGame(roomCode: string, playerName: string, sessionId: string, asSpectator?: boolean): Promise<{ game: Game; player: Player }>
+   - Find game by room code
+   - Validate game is in 'lobby' phase (unless spectator)
+   - Check if player with this sessionId already exists (for reconnection)
+   - If reconnecting, update is_connected and return existing player
+   - If new player, create with next available seat_index
+   - Update game player_count
+   - Return game and player data
+
+3. leaveGame(gameId: string, playerId: string): Promise<void>
+   - Mark player as disconnected (don't delete, for potential rejoin)
+   - Decrement player_count if in lobby
+
+4. reconnectPlayer(sessionId: string): Promise<{ game: Game; player: Player } | null>
+   - Find active game for this session
+   - Mark player as connected
+   - Return game and player, or null if no active game
+
+5. kickPlayer(gameId: string, hostPlayerId: string, targetPlayerId: string): Promise<void>
+   - Verify requester is host (seat_index 0)
+   - Remove target player from game (only in lobby phase)
+
+--------------------------------------------------------------------------------
+PROMPT 3.3: Game Actions - Start Game
+--------------------------------------------------------------------------------
+
+Create the game start logic.
+
+Add to src/lib/supabase/actions/game-actions.ts:
+
+1. startGame(gameId: string, hostPlayerId: string): Promise<Game>
+   - Verify requester is host (seat_index 0)
+   - Verify player count is 5-10
+   - Verify game is in 'lobby' phase
+
+   - Assign roles to all players using roles.ts
+   - Create and shuffle policy deck
+   - Pick random starting president (seat_index)
+
+   - Update game to 'night' phase
+   - Set president_index
+   - Set started_at timestamp
+
+   - Update all players with their roles
+
+   - Return updated game
+
+--------------------------------------------------------------------------------
+PROMPT 3.4: Game Actions - Election Flow
+--------------------------------------------------------------------------------
+
+Create election-related game actions.
+
+Add to src/lib/supabase/actions/game-actions.ts:
+
+1. proceedFromNight(gameId: string): Promise<Game>
+   - Transition from 'night' to 'nomination' phase
+   - Called after all players have seen their roles
+
+2. nominateChancellor(gameId: string, presidentId: string, nomineeId: string): Promise<Game>
+   - Validate nomination
+   - Set chancellor_id to nominee
+   - Transition to 'voting' phase
+   - Reset existing votes for this round
+
+3. castVote(gameId: string, playerId: string, vote: boolean): Promise<{ vote: Vote; allVoted: boolean }>
+   - Create vote record
+   - Check if all alive players have voted
+   - Return vote and whether voting is complete
+
+4. resolveElection(gameId: string): Promise<{ game: Game; result: 'passed' | 'failed' | 'chaos' | 'hitler_elected' }>
+   - Calculate vote result
+   - If passed:
+     - Check for Hitler election win condition
+     - Set previous_president/chancellor to current
+     - Transition to 'legislative_president'
+   - If failed:
+     - Increment election tracker
+     - If chaos (3 failed), enact top policy
+     - Move to next president
+     - Transition to 'nomination'
+   - Return result for UI feedback
+
+--------------------------------------------------------------------------------
+PROMPT 3.5: Game Actions - Legislative Session
+--------------------------------------------------------------------------------
+
+Create legislative session game actions.
+
+Add to src/lib/supabase/actions/game-actions.ts:
+
+1. getPresidentPolicies(gameId: string, presidentId: string): Promise<PolicyType[]>
+   - Validate phase is 'legislative_president'
+   - Validate requester is president
+   - Return the 3 drawn policies (stored in game.drawn_policies)
+
+2. presidentDiscard(gameId: string, presidentId: string, discardIndex: number): Promise<Game>
+   - Validate action
+   - Discard selected policy
+   - Store remaining 2 in president_choices
+   - Transition to 'legislative_chancellor'
+
+3. getChancellorPolicies(gameId: string, chancellorId: string): Promise<PolicyType[]>
+   - Validate phase is 'legislative_chancellor'
+   - Validate requester is chancellor
+   - Return the 2 policies from president
+
+4. chancellorEnact(gameId: string, chancellorId: string, enactIndex: number): Promise<{ game: Game; gameOver: boolean; winner?: TeamType }>
+   - Validate action
+   - Enact selected policy
+   - Discard other policy
+   - Check win conditions
+   - Check for executive power
+   - Transition to appropriate next phase
+   - Return result
+
+5. requestVeto(gameId: string, chancellorId: string): Promise<Game>
+   - Validate veto is unlocked
+   - Set veto_requested flag
+   - Transition to 'veto_requested' phase
+
+6. respondToVeto(gameId: string, presidentId: string, accept: boolean): Promise<Game>
+   - If accepted:
+     - Discard both policies
+     - Advance election tracker (could cause chaos)
+     - Move to next president
+   - If rejected:
+     - Return to 'legislative_chancellor'
+
+--------------------------------------------------------------------------------
+PROMPT 3.6: Game Actions - Executive Actions
+--------------------------------------------------------------------------------
+
+Create executive action game actions.
+
+Add to src/lib/supabase/actions/game-actions.ts:
+
+1. investigatePlayer(gameId: string, presidentId: string, targetId: string): Promise<{ party: PartyType; game: Game }>
+   - Validate action and target
+   - Return target's party affiliation
+   - Add target to investigated list
+   - Transition to 'nomination' for next round
+
+2. callSpecialElection(gameId: string, presidentId: string, targetId: string): Promise<Game>
+   - Validate target is alive and not president
+   - Set target as next president
+   - Store return point for after special election
+   - Transition to 'nomination'
+
+3. peekPolicies(gameId: string, presidentId: string): Promise<{ policies: PolicyType[]; game: Game }>
+   - Return top 3 policies from deck
+   - Transition to 'nomination' for next round
+
+4. executePlayer(gameId: string, presidentId: string, targetId: string): Promise<{ game: Game; gameOver: boolean; winner?: TeamType; wasHitler: boolean }>
+   - Mark target as dead
+   - Check if target was Hitler (liberal victory)
+   - Transition to 'nomination' or 'game_over'
+
+--------------------------------------------------------------------------------
+PROMPT 3.7: Real-time Subscriptions Hook
+--------------------------------------------------------------------------------
+
+Create the real-time game subscription hook.
+
+Create src/hooks/useGame.ts:
+
+1. useGame(roomCode: string) hook:
+   - State:
+     - game: Game | null
+     - players: Player[]
+     - votes: Vote[]
+     - loading: boolean
+     - error: string | null
+
+   - On mount:
+     - Fetch initial game state by room code
+     - Fetch all players for the game
+     - Set up Supabase Realtime subscriptions
+
+   - Subscriptions:
+     - Subscribe to games table changes (filter by room_code)
+     - Subscribe to players table changes (filter by game_id)
+     - Subscribe to votes table changes (filter by game_id)
+
+   - Update handlers:
+     - On game update: merge with state
+     - On player insert/update/delete: update players array
+     - On vote insert/update: update votes array
+
+   - Cleanup:
+     - Unsubscribe from all channels on unmount
+
+   - Return:
+     - game, players, votes, loading, error
+     - Computed values: currentPresident, currentChancellor, alivePlayers
+     - Action functions bound to current game
+
+Create src/hooks/usePlayer.ts:
+
+1. usePlayer(gameId: string, sessionId: string) hook:
+   - Find current player from players list
+   - Return player data including role (only visible to self)
+   - Return isPresident, isChancellor, isAlive computed values
+
+Create src/hooks/useSession.ts:
+
+1. useSession() hook:
+   - Read session from localStorage on mount
+   - Provide updateSession, clearSession functions
+   - Handle SSR (no localStorage on server)
+
+================================================================================
+PHASE 4: FRONTEND COMPONENTS
+================================================================================
+
+--------------------------------------------------------------------------------
+PROMPT 4.1: Layout and Base UI Components
+--------------------------------------------------------------------------------
+
+Create the base layout and reusable UI components.
+
+Create src/app/layout.tsx:
+- Dark mode by default
+- 1930s propaganda aesthetic
+- Mobile-friendly viewport settings
+- Font setup (suggest: Oswald for headers, Inter for body)
+- Full height layout
+
+Create src/components/ui/Button.tsx:
+- Variants: primary (gold/bronze), danger (red), secondary (gray)
+- Sizes: sm, md, lg
+- Full-width option for mobile
+- Loading state with spinner
+- Disabled state
+- Large touch targets (min 44px)
+
+Create src/components/ui/Card.tsx:
+- Dark background with subtle border
+- Optional header
+- Padding variants
+- Shadow for depth
+
+Create src/components/ui/Modal.tsx:
+- Centered overlay
+- Backdrop click to close (optional)
+- Mobile-friendly full-screen on small devices
+- Animation on open/close
+
+Create src/components/ui/Input.tsx:
+- Dark theme styling
+- Label support
+- Error state
+- Large touch targets
+
+Create src/components/ui/Badge.tsx:
+- For player status, roles, etc.
+- Color variants (liberal blue, fascist red, neutral)
+
+Create src/components/ui/Spinner.tsx:
+- Loading indicator
+- Size variants
+
+--------------------------------------------------------------------------------
+PROMPT 4.2: Home Page - Create/Join Game
+--------------------------------------------------------------------------------
+
+Create the home page for creating or joining games.
+
+Create src/app/page.tsx:
+
+Layout:
+- Centered content
+- Game logo/title at top (stylized "Secret Hitler" text)
+- Two main actions: Create Game, Join Game
+
+Create Game flow:
+1. User enters their display name
+2. Click "Create Game"
+3. Creates game and redirects to /game/[roomCode]
+
+Join Game flow:
+1. User enters display name
+2. User enters 6-character room code
+3. Click "Join Game"
+4. Validates room code exists and is joinable
+5. Redirects to /game/[roomCode]
+
+Reconnection:
+- On page load, check for existing session with active game
+- If found, show "Rejoin Game" button
+- Auto-rejoin option
+
+Styling:
+- 1930s propaganda poster aesthetic
+- Dark background with gold accents
+- Large, clear buttons for mobile
+- Input fields with period-appropriate styling
+
+Create src/components/lobby/JoinForm.tsx:
+- Name input
+- Room code input (auto-uppercase, max 6 chars)
+- Join button
+- Error display
+
+--------------------------------------------------------------------------------
+PROMPT 4.3: Game Room Page Structure
+--------------------------------------------------------------------------------
+
+Create the main game room page.
+
+Create src/app/game/[roomCode]/page.tsx:
+
+- Fetch room code from params
+- Use useGame hook to subscribe to game state
+- Use useSession to get current player
+- Use usePlayer to get player-specific data
+
+Conditional rendering based on game phase:
+- lobby: Show LobbyView
+- night: Show NightPhaseView (role reveal)
+- nomination: Show NominationView
+- voting: Show VotingView
+- voting_result: Show VotingResultView
+- legislative_president: Show PresidentLegislativeView
+- legislative_chancellor: Show ChancellorLegislativeView
+- veto_requested: Show VetoView
+- executive_action: Show ExecutiveActionView
+- game_over: Show GameOverView
+
+Common elements (always visible):
+- Game header with room code and phase indicator
+- Player list sidebar/panel
+- Policy boards (liberal and fascist tracks)
+- Election tracker
+- Current player's role card (minimized, expandable)
+
+Mobile layout:
+- Stack vertically
+- Collapsible sections
+- Bottom action bar for current player's actions
+- Swipe/tab navigation between views if needed
+
+Create src/components/game/GameHeader.tsx:
+- Room code display with copy button
+- QR code for easy sharing (use qrcode.react)
+- Current phase indicator
+- Leave game button
+
+--------------------------------------------------------------------------------
+PROMPT 4.4: Lobby Components
+--------------------------------------------------------------------------------
+
+Create the lobby phase components.
+
+Create src/components/lobby/PlayerLobby.tsx:
+- List of joined players with names
+- Indicate host (seat 0) with crown/star icon
+- Show player count (X/10)
+- Show minimum players needed to start (5)
+- Start Game button (host only, enabled when 5-10 players)
+- Kick player button (host only)
+
+Create src/components/lobby/QRCode.tsx:
+- Generate QR code for game URL
+- Use qrcode.react library
+- Display below or beside room code
+- Size appropriate for mobile scanning
+
+Create src/components/lobby/SharePanel.tsx:
+- Room code in large, copyable text
+- Copy link button
+- QR code
+- Instructions for joining
+
+Spectator option:
+- Toggle or separate button to join as spectator
+- Spectators listed separately
+
+--------------------------------------------------------------------------------
+PROMPT 4.5: Player List and Policy Boards
+--------------------------------------------------------------------------------
+
+Create the persistent game UI components.
+
+Create src/components/game/PlayerList.tsx:
+- Circular or list layout of all players
+- Current president indicator (placard icon)
+- Chancellor indicator (if elected)
+- Dead/executed players (grayed out, crossed)
+- Term-limited players (subtle indicator)
+- Current player highlighted
+- Voting results shown after election (Ja/Nein icons)
+
+Create src/components/game/PolicyBoard.tsx:
+- Liberal track (5 slots) - blue themed
+- Fascist track (6 slots) - red themed
+- Show enacted policies as filled slots
+- Show presidential powers on fascist track (icons)
+- Veto power indicator when unlocked
+- Visual feedback when policy is enacted
+
+Create src/components/game/ElectionTracker.tsx:
+- 3-slot tracker
+- Show current position
+- Warning styling when at 2/3
+- Reset animation when policy enacted
+
+Create src/components/game/RoleCard.tsx:
+- Minimized view: small card showing party (not role)
+- Expanded view: full role reveal with art
+- Tap to toggle expanded
+- Show team members (for fascists)
+- Liberal: blue card
+- Fascist: red card with "Fascist" text
+- Hitler: red card with "Hitler" text
+
+--------------------------------------------------------------------------------
+PROMPT 4.6: Night Phase (Role Reveal)
+--------------------------------------------------------------------------------
+
+Create the night phase / role reveal view.
+
+Create src/components/game/NightPhaseView.tsx:
+
+For all players:
+- Dramatic reveal of their role card
+- Animation: card flip or fade in
+- Clear indication of role and party
+
+For Liberals:
+- "You are a Liberal"
+- No additional information
+- Prompt to close eyes (thematic)
+
+For Fascists (non-Hitler):
+- "You are a Fascist"
+- Show fellow fascists and Hitler
+- In 5-6 player games: show Hitler's identity
+- In 7-10 player games: show Hitler but they don't see you
+
+For Hitler:
+- "You are Hitler"
+- In 5-6 player games: show fellow fascists
+- In 7-10 player games: "You don't know who the fascists are"
+
+"I've seen my role" button to acknowledge:
+- Track which players have acknowledged
+- When all players acknowledge, transition to nomination
+
+Theming:
+- Dark, dramatic atmosphere
+- Red glow for fascist/Hitler reveals
+- Blue calm for liberal reveals
+
+--------------------------------------------------------------------------------
+PROMPT 4.7: Nomination and Voting
+--------------------------------------------------------------------------------
+
+Create the nomination and voting components.
+
+Create src/components/game/NominationView.tsx:
+
+For President:
+- "You are the Presidential Candidate"
+- List of eligible chancellor candidates
+- Each candidate is a tappable card/button
+- Show why some are ineligible (term-limited)
+- Confirm nomination button
+
+For other players:
+- "Waiting for [President Name] to nominate a Chancellor"
+- Show who is eligible
+- Discussion prompt
+
+Create src/components/game/VotingView.tsx:
+
+- Show proposed government: President and Chancellor names
+- Two large vote buttons: "Ja!" (yes) and "Nein!" (no)
+- Confirm vote (or vote directly without confirm for speed)
+- Show who has voted (but not how) as checkmarks
+- Timer or prompt to vote
+
+For dead players/spectators:
+- Show voting in progress
+- Cannot vote
+
+Create src/components/game/VotingResultView.tsx:
+
+- Dramatic reveal of all votes
+- Show each player's vote
+- Clear passed/failed indicator
+- If passed: show new government
+- If failed: show election tracker advancing
+- If chaos: show policy being auto-enacted
+- If Hitler elected (and 3+ fascist): GAME OVER
+
+Auto-advance after a few seconds or "Continue" button
+
+--------------------------------------------------------------------------------
+PROMPT 4.8: Legislative Session
+--------------------------------------------------------------------------------
+
+Create the legislative session components.
+
+Create src/components/game/PresidentLegislativeView.tsx:
+
+For President:
+- "You drew 3 policies. Discard one."
+- Show 3 policy cards (face up to president only)
+- Tap to select which to discard
+- Confirm discard button
+- No communication reminder
+
+For other players:
+- "The President is examining policies..."
+- Show policies being passed animation
+- Hidden state
+
+Create src/components/game/ChancellorLegislativeView.tsx:
+
+For Chancellor:
+- "Choose a policy to enact."
+- Show 2 policy cards
+- Tap to select which to enact
+- If veto unlocked: "Request Veto" button option
+- Confirm enact button
+
+For other players:
+- "The Chancellor is choosing a policy..."
+- Waiting animation
+
+Create src/components/game/PolicyEnactedView.tsx (or animation):
+- Dramatic reveal of enacted policy
+- Liberal: triumphant blue
+- Fascist: ominous red
+- Update policy track
+- If executive power: show what power was unlocked
+
+Create src/components/game/VetoView.tsx:
+
+For President (when veto requested):
+- "The Chancellor wishes to veto this agenda"
+- Accept Veto / Reject Veto buttons
+- Show consequences (election tracker advances)
+
+For Chancellor (awaiting response):
+- "Waiting for President's response..."
+
+For others:
+- "A veto has been requested..."
+
+--------------------------------------------------------------------------------
+PROMPT 4.9: Executive Actions
+--------------------------------------------------------------------------------
+
+Create the executive action components.
+
+Create src/components/game/ExecutiveActionView.tsx:
+- Container that renders appropriate action based on type
+
+Create src/components/game/InvestigateLoyaltyView.tsx:
+
+For President:
+- "Investigate a player's loyalty"
+- List of valid targets (not self, not already investigated)
+- Tap to select
+- Confirm button
+- Reveal target's PARTY (not role)
+- "I've seen the result" button
+
+For others:
+- "[President] is investigating..."
+- Suspense
+
+Create src/components/game/SpecialElectionView.tsx:
+
+For President:
+- "Call a Special Election"
+- "Choose the next Presidential Candidate"
+- List of all alive players (except self)
+- Confirm selection
+
+For others:
+- "[President] is calling a special election..."
+
+Create src/components/game/PolicyPeekView.tsx:
+
+For President:
+- "You may peek at the next 3 policies"
+- Show top 3 cards from deck
+- "I've seen them" button to continue
+- Reminder: this is secret info
+
+For others:
+- "[President] is peeking at policies..."
+
+Create src/components/game/ExecutionView.tsx:
+
+For President:
+- "You must execute a player"
+- Dramatic presentation
+- List of alive players (except self)
+- Confirm with extra warning ("This cannot be undone")
+
+For others:
+- "[President] is choosing who to execute..."
+- Tension building
+
+Execution result:
+- If Hitler: GAME OVER (liberals win)
+- If not Hitler: player eliminated, no role revealed
+
+--------------------------------------------------------------------------------
+PROMPT 4.10: Game Over Screen
+--------------------------------------------------------------------------------
+
+Create the game over view.
+
+Create src/components/game/GameOverView.tsx:
+
+Display based on outcome:
+
+Liberal Victory - 5 Policies:
+- "Liberals Win!"
+- "Five Liberal Policies have been enacted"
+- Blue celebratory theme
+
+Liberal Victory - Hitler Killed:
+- "Liberals Win!"
+- "Hitler has been assassinated"
+- Show who was Hitler
+- Blue/dramatic theme
+
+Fascist Victory - 6 Policies:
+- "Fascists Win!"
+- "Six Fascist Policies have been enacted"
+- Red ominous theme
+
+Fascist Victory - Hitler Elected:
+- "Fascists Win!"
+- "Hitler has been elected Chancellor"
+- Show Hitler's identity
+- Red triumphant theme
+
+Common elements:
+- Reveal all player roles
+- Show final policy boards
+- "Play Again" button (returns to lobby)
+- "Leave Game" button (returns to home)
+
+--------------------------------------------------------------------------------
+PROMPT 4.11: Spectator View
+--------------------------------------------------------------------------------
+
+Create spectator-specific views.
+
+Create src/components/game/SpectatorView.tsx:
+
+- Same game state visibility as players
+- Cannot see hidden information (roles, policies in hand)
+- No action buttons
+- "Watching" indicator
+
+- Show all the same components but in read-only mode:
+  - Player list
+  - Policy boards
+  - Election tracker
+  - Current phase indicator
+  - Voting progress (not individual votes until revealed)
+
+- Spectator count indicator
+- Leave game button
+
+================================================================================
+PHASE 5: MOBILE OPTIMIZATION & POLISH
+================================================================================
+
+--------------------------------------------------------------------------------
+PROMPT 5.1: Mobile-First Responsive Design
+--------------------------------------------------------------------------------
+
+Optimize all components for mobile-first experience.
+
+Requirements:
+
+Touch targets:
+- All interactive elements minimum 44x44px
+- Adequate spacing between touch targets
+- No hover-dependent interactions
+
+Layout:
+- Single column on mobile
+- Stack views vertically
+- Horizontal scroll only where absolutely necessary
+- Full-width buttons
+- Thumb-zone placement for primary actions (bottom of screen)
+
+Navigation:
+- Collapsible panels for secondary info
+- Tab bar or swipe for major sections
+- Clear back/exit paths
+
+Typography:
+- Minimum 16px for body text (prevents zoom on iOS)
+- Clear hierarchy
+- Adequate line height
+
+Forms:
+- Large input fields
+- Appropriate input types (tel for room codes?)
+- Clear labels
+- Error messages visible without scrolling
+
+Gestures (optional enhancements):
+- Tap to reveal role card
+- Swipe to navigate sections
+- Pull to refresh game state (if applicable)
+
+Performance:
+- Minimize re-renders
+- Lazy load heavy components
+- Optimize images/assets
+
+Testing:
+- Test on actual mobile devices
+- Test in mobile browser dev tools
+- Test with different screen sizes (iPhone SE to tablets)
+
+--------------------------------------------------------------------------------
+PROMPT 5.2: Visual Polish and Animations
+--------------------------------------------------------------------------------
+
+Add visual polish and animations for better UX.
+
+Animations:
+- Policy card flip/reveal
+- Vote reveal (staggered)
+- Phase transitions (fade/slide)
+- Election tracker movement
+- Policy placement on board
+- Role card hover/tap effects
+- Loading states
+
+Visual polish:
+- Subtle shadows and depth
+- Gradient accents
+- Icon consistency
+- Empty states
+- Error states
+- Loading states
+
+1930s aesthetic details:
+- Propaganda poster elements
+- Period-appropriate typography
+- Eagle/wing motifs (subtle)
+- Art deco geometric patterns
+- Aged paper textures (subtle)
+- Dramatic lighting effects
+
+Feedback:
+- Button press states
+- Success/error indicators
+- Sound effects (optional, with mute)
+- Haptic feedback hints (if supported)
+
+Accessibility:
+- Color contrast (WCAG AA minimum)
+- Focus indicators
+- Screen reader labels
+- Reduced motion support
+
+--------------------------------------------------------------------------------
+PROMPT 5.3: Error Handling and Edge Cases
+--------------------------------------------------------------------------------
+
+Implement robust error handling.
+
+Connection handling:
+- Detect disconnection
+- Show reconnecting indicator
+- Auto-reconnect logic
+- Graceful degradation
+
+Game state edge cases:
+- Player disconnects mid-action
+- Host leaves the game
+- All players leave
+- Browser refresh during action
+- Multiple tabs open
+
+Error displays:
+- User-friendly error messages
+- Retry options where applicable
+- Clear path to recover
+
+Timeouts:
+- Handle slow responses
+- Loading indicators
+- Cancel/abort options
+
+State synchronization:
+- Handle stale state
+- Conflict resolution
+- Optimistic UI with rollback
+
+Validation:
+- Client-side validation for immediate feedback
+- Server-side validation for security
+- Clear validation error messages
+
+--------------------------------------------------------------------------------
+PROMPT 5.4: Final Integration and Testing
+--------------------------------------------------------------------------------
+
+Final integration, testing, and deployment prep.
+
+Integration:
+- Verify all game flows work end-to-end
+- Test all player counts (5-10)
+- Test all executive powers
+- Test all win conditions
+- Test spectator mode
+- Test reconnection
+- Test mobile and desktop
+
+Testing:
+- Unit tests for game engine logic
+- Integration tests for Supabase actions
+- E2E tests for critical paths:
+  - Create and join game
+  - Start game and see roles
+  - Complete election
+  - Enact policy
+  - Win the game
+
+Documentation:
+- Update CLAUDE.md with any changes
+- Add setup instructions to README
+- Document environment variables
+- Add troubleshooting guide
+
+Deployment:
+- Configure Netlify
+- Set environment variables
+- Test production build
+- Verify Supabase connection
+- Test real-time updates
+
+Performance:
+- Lighthouse audit
+- Bundle size check
+- Loading time optimization
+- Database query optimization
+
+================================================================================
+END OF PROMPTS
+================================================================================
+
+Summary of phases:
+1. Project Setup & Infrastructure (3 prompts)
+2. Core Game Engine (7 prompts)
+3. Supabase Integration & Game Actions (7 prompts)
+4. Frontend Components (11 prompts)
+5. Mobile Optimization & Polish (4 prompts)
+
+Total: 32 prompts for complete implementation
+
+Each prompt can be executed independently but builds on previous work.
+Reference CLAUDE.md for architecture decisions and coding conventions.
+Reference rules.txt for game rules and mechanics.

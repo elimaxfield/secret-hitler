@@ -1,0 +1,136 @@
+@import 'tailwindcss';
+
+/* CSS Variables for the 1930s propaganda aesthetic */
+:root {
+  /* Primary backgrounds */
+  --bg-primary: #1a1a1a;
+  --bg-secondary: #2d2d2d;
+  --bg-card: #3d3d3d;
+
+  /* Text colors */
+  --text-primary: #f5e6d3;
+  --text-secondary: #a89f91;
+
+  /* Liberal theme */
+  --liberal-primary: #1e4d6b;
+  --liberal-secondary: #2d6a8f;
+
+  /* Fascist theme */
+  --fascist-primary: #8b1e1e;
+  --fascist-secondary: #a62c2c;
+
+  /* Accent colors */
+  --accent-gold: #c4a84b;
+  --accent-bronze: #8b6914;
+
+  /* Status colors */
+  --success: #2d5a3d;
+  --warning: #8b6914;
+  --danger: #8b1e1e;
+}
+
+/* Base styles */
+html {
+  color-scheme: dark;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  min-height: 100vh;
+  min-height: 100dvh; /* Dynamic viewport height for mobile */
+}
+
+/* Typography */
+h1, h2, h3, h4, h5, h6 {
+  font-family: 'Oswald', system-ui, sans-serif;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Custom scrollbar for dark mode */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--bg-card);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* Focus styles for accessibility */
+:focus-visible {
+  outline: 2px solid var(--accent-gold);
+  outline-offset: 2px;
+}
+
+/* Touch-friendly minimum sizes */
+button,
+[role="button"],
+input[type="submit"],
+input[type="button"] {
+  min-height: 44px;
+  min-width: 44px;
+}
+
+/* Prevent text size adjustment on iOS */
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Selection color */
+::selection {
+  background-color: var(--accent-gold);
+  color: var(--bg-primary);
+}
+
+/* Utility classes for game-specific styling */
+.liberal-glow {
+  box-shadow: 0 0 20px rgba(30, 77, 107, 0.5);
+}
+
+.fascist-glow {
+  box-shadow: 0 0 20px rgba(139, 30, 30, 0.5);
+}
+
+.gold-text {
+  background: linear-gradient(135deg, #c4a84b 0%, #8b6914 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+/* Card flip animation */
+.card-flip {
+  perspective: 1000px;
+}
+
+.card-flip-inner {
+  transition: transform 0.6s;
+  transform-style: preserve-3d;
+}
+
+.card-flip.flipped .card-flip-inner {
+  transform: rotateY(180deg);
+}
+
+.card-front,
+.card-back {
+  -webkit-backface-visibility: hidden;
+  backface-visibility: hidden;
+}
+
+.card-back {
+  transform: rotateY(180deg);
+}
